@@ -1,0 +1,102 @@
+#!/bin/bash
+#SBATCH --job-name=amico_noddi
+#SBATCH --output=logs/%x_%j.out 
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=40
+#SBATCH --time=02:00:00
+
+SUB_SIZE=1 ## number of subjects to run is 1 because there are multiple tasks/run that will run in parallel 
+CORES=40
+export THREADS_PER_COMMAND=2
+
+####----### the next bit only works IF this script is submitted from the $BASEDIR/$OPENNEURO_DS folder...
+
+## set the second environment variable to get the base directory
+BASEDIR=${SLURM_SUBMIT_DIR}
+
+## set up a trap that will clear the ramdisk if it is not cleared
+function cleanup_ramdisk {
+    echo -n "Cleaning up ramdisk directory /$SLURM_TMPDIR/ on "
+    date
+    rm -rf /$SLURM_TMPDIR
+    echo -n "done at "
+    date
+}
+
+#trap the termination signal, and call the function 'trap_term' when
+# that happens, so results may be saved.
+trap "cleanup_ramdisk" TERM
+
+
+# input is BIDS_DIR this is where the data downloaded from openneuro went
+export BIDS_DIR=${BASEDIR}/data/local/bids
+export QSIPREP_DIR=${BASEDIR}/data/local/derivatives/qsiprep/0.22.0/qsiprep
+export SING_CONTAINER=${BASEDIR}/containers/qsiprep-0.22.0.sif
+export OUTPUT_DIR=${BASEDIR}/data/local/derivatives/qsiprep/0.22.0/amico_noddi
+export TMP_DIR=${BASEDIR}/data/local/derivatives/qsiprep/0.22.0/amico_noddi/tmp
+project_id=$(cat ${BASEDIR}/project_id)
+export WORK_DIR=${BBUFFER}/SCanD/${project_id}/amico
+export LOGS_DIR=${BASEDIR}/logs
+
+mkdir -vp ${OUTPUT_DIR} ${WORK_DIR} ${TMP_DIR}
+
+bigger_bit=`echo "($SLURM_ARRAY_TASK_ID + 1) * ${SUB_SIZE}" | bc`
+
+N_SUBJECTS=$(( $( wc -l ${BIDS_DIR}/participants.tsv | cut -f1 -d' ' ) - 1 ))
+array_job_length=$(echo "$N_SUBJECTS/${SUB_SIZE}" | bc)
+Tail=$((N_SUBJECTS-(array_job_length*SUB_SIZE)))
+
+if [ "$SLURM_ARRAY_TASK_ID" -eq "$array_job_length" ]; then
+    SUBJECTS=`sed -n -E "s/sub-(\S*)\>.*/\1/gp" ${BIDS_DIR}/participants.tsv  | head -n ${N_SUBJECTS} | tail -n ${Tail}`
+else
+    SUBJECTS=`sed -n -E "s/sub-(\S*)\>.*/\1/gp" ${BIDS_DIR}/participants.tsv | head -n ${bigger_bit} | tail -n ${SUB_SIZE}`
+fi
+
+
+
+export SINGULARITYENV_FS_LICENSE=${BASEDIR}/templates/.freesurfer.txt
+
+singularity run --cleanenv \
+  -H ${TMP_DIR} \
+  -B ${BIDS_DIR}:/bids \
+  -B ${QSIPREP_DIR}:/qsiprep \
+  -B ${OUTPUT_DIR}:/out \
+  -B ${WORK_DIR}:/work \
+  -B ${SINGULARITYENV_FS_LICENSE}:/li \
+  ${SING_CONTAINER} \
+  /bids /out participant \
+  --skip-bids-validation \
+  --participant_label ${SUBJECTS} \
+  --recon-only \
+  --recon-spec amico_noddi \
+  --recon-input /qsiprep \
+  --n_cpus 4 --omp-nthreads 2 \
+  --output-resolution 1.7 \
+  --fs-license-file /li \
+  -w /work \
+  --notrack
+
+
+## nipoppy trackers 
+
+singularity exec \
+  --bind ${SCRATCH}:${SCRATCH} \
+  --env SUBJECTS="$SUBJECTS" \
+  containers/nipoppy.sif /bin/bash -c '
+    set -euo pipefail
+
+    BASEDIR="$SCRATCH/SCanD_project"
+    cd "$BASEDIR/Neurobagel"
+    
+    mkdir -p derivatives/amiconoddi/0.22.0/output/
+    ls -al derivatives/amiconoddi/0.22.0/output/
+
+    ln -s "$BASEDIR/data/local/derivatives/qsiprep/0.22.0/amico_noddi/"* derivatives/amiconoddi/0.22.0/output/ || true
+
+    for subject in $SUBJECTS; do
+      nipoppy track \
+        --pipeline amiconoddi \
+        --pipeline-version 0.22.0 \
+        --participant-id sub-$subject
+    done
+  '
