@@ -1,0 +1,47 @@
+```{r}
+library(dplyr)
+library(readr)
+```
+
+```{r}
+demo_path <- "/scratch/a/arisvoin/aurorem/SCanD_project/brainage_demographics_longitudinal2025_edited.csv"
+demographics <- read_csv(demo_path)
+colnames(demographics)
+```
+
+```{r}
+sexes <- c("females", "males")
+sessions <- c("session01", "session03", "session05", "session07")
+base_path <- "/scratch/a/arisvoin/aurorem/SCanD_project/brainage_output_files"
+```
+
+```{r}
+all_data <- list()
+
+for (sex in sexes) {
+  for (session in sessions) {
+    folder_path <- file.path(base_path, sex, session)
+    files <- list.files(folder_path, full.names = TRUE)
+    df_list <- lapply(files, read.csv)  
+    session_data <- bind_rows(df_list)
+    session_data <- session_data %>%
+      mutate(sex = sex,
+             session = session)
+    all_data[[paste(sex, session, sep = "_")]] <- session_data
+  }
+}
+
+brainage_outputs <- bind_rows(all_data)
+glimpse(brainage_outputs)
+```
+
+```{r}
+combined_data <- brainage_outputs %>%
+  left_join(demographics, by = "participant")
+
+glimpse(combined_data)
+```
+
+```{r}
+write_csv(combined_data, "/scratch/a/arisvoin/aurorem/SCanD_project/combined_brainage_demographics.csv")
+```
